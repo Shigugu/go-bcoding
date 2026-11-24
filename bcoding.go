@@ -2,146 +2,199 @@ package bcoding
 
 import (
 	"fmt"
+	"io"
+	"os"
 	"strconv"
+	"time"
 )
 
-const DICT_STRUCT int = 1
-const LIST_STRUCT int = 2
-const INT_STRUCT int = 3
+type nestedStruct int
+type lexerState int
 
-const DEFAULT_STATE int = 0
-const READING_LEN int = 1
-const READING_STR int = 2
-const READING_INT int = 3
+const (
+	dictStruct nestedStruct = iota
+	listStruct
+	intStruct
+)
 
-const DICT_BYTE byte = 'd'
-const LIST_BYTE byte = 'l'
-const INT_BYTE byte = 'i'
-const END_BYTE byte = 'e'
+const (
+	defaultState lexerState = iota
+	readingLen
+	readingStr
+	readingInt
+)
 
-func intLexxer(tokens *[]string, currentToken *[]byte, lexxerState *int, chr byte) error {
+const (
+	dictByte byte = 'd'
+	listByte byte = 'l'
+	intByte  byte = 'i'
+	endByte  byte = 'e'
+)
+
+type lexer struct {
+	tokens        []string
+	nestedStructs []nestedStruct
+	currentToken  []byte
+	state         lexerState
+	length        int // next str token length
+	position      int
+}
+
+func (l *lexer) intLexxer(chr byte) error {
 	if chr == '-' || '0' <= chr && chr <= '9' {
-		*currentToken = append(*currentToken, chr)
-	} else if chr == END_BYTE {
-		*tokens = append(*tokens, string(*currentToken))
-		*currentToken = nil
-		*lexxerState = DEFAULT_STATE
+		l.currentToken = append(l.currentToken, chr)
+	} else if chr == endByte {
+		l.tokens = append(l.tokens, string(l.currentToken))
+		l.currentToken = nil
+		l.tokens = append(l.tokens, string(chr))
+		l.state = defaultState
 	} else {
-		return fmt.Errorf("expected numeric or sign character, found: %c", chr)
+		return fmt.Errorf("expected numeric or sign character, found: %c at position %d", chr, l.position)
 	}
 
 	return nil
 }
 
-func lenLexxer(tokens *[]string, currentToken *[]byte, lexxerState *int, length *int, chr byte) error {
+func (l *lexer) lenLexxer(chr byte) error {
 	if '0' <= chr && chr <= '9' {
-		*currentToken = append(*currentToken, chr)
+		l.currentToken = append(l.currentToken, chr)
+
 		return nil
 	} else if chr == ':' {
 		var err error
-		*tokens = append(*tokens, string(*currentToken))
-		*lexxerState = READING_STR
-		*length, err = strconv.Atoi((*tokens)[len(*tokens)-1])
+		l.tokens = append(l.tokens, string(l.currentToken))
+		l.state = readingStr
+		l.length, err = strconv.Atoi((l.tokens)[len(l.tokens)-1])
 		if err != nil {
-			return fmt.Errorf("could not convert token to int: %s", *currentToken)
+			return fmt.Errorf("could not convert token to int: %s at position %d", l.currentToken, l.position)
 		}
-		*currentToken = nil
-		if *length <= 0 {
-			return fmt.Errorf("str length should be positive: %d", *length)
+		l.currentToken = nil
+		if l.length <= 0 {
+			return fmt.Errorf("str length should be positive: %d at position %d", l.length, l.position)
 		}
+
 		return nil
 	}
-	return fmt.Errorf("expected numeric or sign character, found: %c", chr)
+	return fmt.Errorf("expected numeric or sign character, found: %c at position %d", chr, l.position)
 }
 
-func strLexxer(tokens *[]string, currentToken *[]byte, lexxerState *int, length *int, chr byte) error {
-	*currentToken = append(*currentToken, chr)
-	*length -= 1
-	if *length == 0 {
-		*tokens = append(*tokens, string(*currentToken))
-		*currentToken = nil
-		*lexxerState = DEFAULT_STATE
+func (l *lexer) strLexxer(chr byte) error {
+	l.currentToken = append(l.currentToken, chr)
+	l.length -= 1
+	if l.length == 0 {
+		l.tokens = append(l.tokens, string(l.currentToken))
+		l.currentToken = nil
+		l.state = defaultState
 	}
 
 	return nil
 }
 
-func defaultLexxer(tokens *[]string, currentToken *[]byte, nestedStructs *[]int, lexxerState *int, chr byte) error {
+func (l *lexer) defaultLexxer(chr byte) error {
 	switch {
-	case chr == DICT_BYTE:
-		*tokens = append(*tokens, string(chr))
-		*nestedStructs = append(*nestedStructs, DICT_STRUCT)
-		*lexxerState = READING_LEN
-	case chr == LIST_BYTE:
-		*tokens = append(*tokens, string(chr))
-		*nestedStructs = append(*nestedStructs, LIST_STRUCT)
-	case chr == END_BYTE:
-		*tokens = append(*tokens, string(*currentToken))
-		*currentToken = nil
-		*tokens = append(*tokens, string(chr))
+	case chr == dictByte:
+		l.tokens = append(l.tokens, string(chr))
+		l.nestedStructs = append(l.nestedStructs, dictStruct)
+		l.state = readingLen
+	case chr == listByte:
+		l.tokens = append(l.tokens, string(chr))
+		l.nestedStructs = append(l.nestedStructs, listStruct)
+	case chr == endByte:
+		l.tokens = append(l.tokens, string(chr))
 		// pop last nested struct
-		*nestedStructs = (*nestedStructs)[:len(*nestedStructs)-1]
-		if len(*nestedStructs) > 0 && (*nestedStructs)[len(*nestedStructs)-1] == DICT_STRUCT {
-			*lexxerState = READING_LEN
-		} else {
-			*lexxerState = DEFAULT_STATE
-		}
-	case chr == INT_BYTE:
-		*tokens = append(*tokens, string(chr))
-		*nestedStructs = append(*nestedStructs, INT_STRUCT)
-		*lexxerState = READING_INT
+		l.nestedStructs = (l.nestedStructs)[:len(l.nestedStructs)-1]
+	case chr == intByte:
+		l.tokens = append(l.tokens, string(chr))
+		l.nestedStructs = append(l.nestedStructs, intStruct)
+		l.state = readingInt
 	case '0' <= chr && chr <= '9':
-		*currentToken = append(*currentToken, chr)
-		*lexxerState = READING_LEN
+		l.currentToken = append(l.currentToken, chr)
+		l.state = readingLen
 	case chr == 0:
 		return nil
 	default:
-		return fmt.Errorf("unexpected token while tokenizing: %c", chr)
+		return fmt.Errorf("unexpected token while tokenizing: %c at position %d", chr, l.position)
 	}
 
 	return nil
 }
 
-func btokenize(ch chan []byte) ([]string, error) {
-	var tokens []string
-	var currentToken []byte
-	var nestedStructs []int
-	var lexxerState int = DEFAULT_STATE
-	var length int
+func btokenize(chBuf chan []byte, chAck chan bool) ([]string, error) {
+	var lexer = &lexer{}
 	var err error
 
-	for str := range ch {
+	for str := range chBuf {
 		for _, chr := range str {
-			switch lexxerState {
-			case DEFAULT_STATE:
-				err = defaultLexxer(&tokens, &currentToken, &nestedStructs, &lexxerState, chr)
-			case READING_LEN:
-				err = lenLexxer(&tokens, &currentToken, &lexxerState, &length, chr)
-			case READING_STR:
-				err = strLexxer(&tokens, &currentToken, &lexxerState, &length, chr)
-			case READING_INT:
-				err = intLexxer(&tokens, &currentToken, &lexxerState, chr)
+			switch lexer.state {
+			case defaultState:
+				err = lexer.defaultLexxer(chr)
+			case readingLen:
+				err = lexer.lenLexxer(chr)
+			case readingStr:
+				err = lexer.strLexxer(chr)
+			case readingInt:
+				err = lexer.intLexxer(chr)
 			}
 			if err != nil {
-				// DEBUG
-				fmt.Println(tokens)
+
 				return nil, err
 			}
+			lexer.position += 1
 		}
+		chAck <- true
 	}
 
-	return tokens, nil
+	return lexer.tokens, nil
 }
 
-func Bdecode(ch chan []byte) (map[string]any, error) {
+func Bdecode(chBuf chan []byte, chAck chan bool) (map[string]any, error) {
 	m := make(map[string]any)
-	tokens, err := btokenize(ch)
+	_, err := btokenize(chBuf, chAck)
 	if err != nil {
 		return nil, err
 	}
-	fmt.Println(tokens)
+	// fmt.Println(tokens)
 
 	// parse tokens
 
 	return m, nil
+}
+
+func BdecodeFile(filename string) (map[string]any, error) {
+	const BUF_SZ = 128
+
+	file, err := os.Open(filename)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+
+	buf := make([]byte, BUF_SZ)
+	chBuf := make(chan []byte)
+	var chAck = make(chan bool, 1)
+	go func() {
+		for {
+			n, err := file.Read(buf)
+			if err != nil {
+				if err != io.EOF {
+					fmt.Println(err)
+				}
+				break
+			}
+			chBuf <- buf[:n]
+			// wait for ack
+		outer:
+			for {
+				select {
+				case <-chAck:
+					break outer
+				default:
+					time.Sleep(100 * time.Nanosecond)
+				}
+			}
+		}
+		close(chBuf)
+	}()
+
+	return Bdecode(chBuf, chAck)
 }
